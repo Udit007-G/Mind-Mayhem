@@ -20,12 +20,12 @@ function normalize(value) { return String(value || '').toLowerCase().trim().repl
 function send(ws, message) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message)); }
 function clearTimer(room) { if (room.timer) clearTimeout(room.timer); room.timer = null; }
 function arm(room, fn, ms) { clearTimer(room); room.deadline = Date.now() + ms; room.timer = setTimeout(fn, ms); }
-function playerView(player) { return { id: player.id, name: player.name, score: player.score, roundPoints: player.roundPoints, streak: player.streak, bestStreak: player.bestStreak, connected: player.connected, avatar: player.avatar, color: player.color, powerups: player.powerups }; }
+function playerView(player) { return { id: player.id, name: player.name, score: player.score, roundPoints: player.roundPoints, streak: player.streak, bestStreak: player.bestStreak, matches: player.matches, averageSubmitMs: player.submitCount ? Math.round(player.totalSubmitMs / player.submitCount) : null, connected: player.connected, avatar: player.avatar, color: player.color, powerups: player.powerups }; }
 function view(room, playerId) {
-  const visibleAnswers = room.phase === 'results' || room.phase === 'finished' ? room.answers.map(answer => ({ text: answer.text, authorId: answer.authorId, points: answer.points, groupSize: answer.groupSize })) : [];
-  return { code: room.code, hostId: room.hostId, phase: room.phase, round: room.round, totalRounds: room.totalRounds, mode: room.mode, modeLabel: room.modeLabel, prompt: room.prompt, options: room.options, chaos: room.chaos, perfectMeld: room.perfectMeld, deadline: room.deadline, players: [...room.players.values()].map(playerView), answers: visibleAnswers, me: room.players.has(playerId) ? { answer: room.players.get(playerId).answer, usedPowerup: room.players.get(playerId).usedPowerup } : null };
+  const visibleAnswers = room.phase === 'results' || room.phase === 'finished' ? room.answers.map(answer => ({ text: answer.text, authorId: answer.authorId, points: answer.points, groupSize: answer.groupSize, memberIds: answer.memberIds })) : [];
+  return { code: room.code, hostId: room.hostId, phase: room.phase, round: room.round, totalRounds: room.totalRounds, mode: room.mode, modeLabel: room.modeLabel, prompt: room.prompt, options: room.options, chaos: room.chaos, perfectMeld: room.perfectMeld, fastestId: room.fastestId, deadline: room.deadline, players: [...room.players.values()].map(playerView), answers: visibleAnswers, me: room.players.has(playerId) ? { answer: room.players.get(playerId).answer, risk: room.players.get(playerId).risk, usedPowerup: room.players.get(playerId).usedPowerup } : null };
 }
-function broadcast(room) { room.lastActivity = Date.now(); for (const player of room.players.values()) send(player.ws, { type: 'state', state: view(room, player.id) }); }
+function broadcast(room) { room.lastActivity = Date.now(); for (const player of room.players.values()) send(player.ws, { type: 'state', state: view(room, player.id) }); for (const spectator of room.spectators || []) send(spectator, { type: 'state', state: view(room, null) }); }
 function migrateHost(room) { const nextHost = [...room.players.values()].find(player => player.connected); if (!nextHost || nextHost.id === room.hostId) return; const previousHost = room.players.get(room.hostId); room.hostId = nextHost.id; for (const player of room.players.values()) send(player.ws, { type: 'toast', message: '👑 ' + nextHost.name + ' is now host.' }); broadcast(room); }
 function reaction(room, player, emoji) { if (Date.now() - player.lastReaction < 900) return; player.lastReaction = Date.now(); for (const target of room.players.values()) send(target.ws, { type: 'reaction', emoji, name: player.name }); }
 function startRound(room) {
@@ -34,7 +34,7 @@ function startRound(room) {
   room.modeLabel = room.round === room.totalRounds ? 'ULTIMATE MELD · 2X POINTS' : room.mode === 'majority' ? 'MAJORITY MIND · PICK ONE' : room.mode === 'risky' ? 'RISKY MIND · HIGH STAKES' : room.mode === 'chaos' ? 'CHAOS ROUND · DOUBLE POINTS' : 'CLASSIC MIND MELD';
   room.prompt = room.round === room.totalRounds ? 'The one thing everyone would take to a deserted island.' : promptData[1];
   room.options = room.mode === 'majority' ? options : []; room.chaos = room.mode === 'chaos' ? 'Double points + fastest answer bonus' : room.mode === 'risky' ? 'Risk answers pay 2x when matched' : room.mode === 'final' ? 'Every match is worth 2x' : '';
-  room.answers = []; room.perfectMeld = false; room.fastestId = null; for (const player of room.players.values()) { player.answer = null; player.submittedAt = null; player.roundPoints = 0; player.usedPowerup = null; }
+  room.answers = []; room.perfectMeld = false; room.fastestId = null; for (const player of room.players.values()) { player.answer = null; player.risk = false; player.submittedAt = null; player.roundPoints = 0; player.usedPowerup = null; }
   arm(room, () => reveal(room), 30000); broadcast(room);
 }
 function reveal(room) {
@@ -49,26 +49,26 @@ function reveal(room) {
   room.answers = [...groups.values()].flatMap(group => group.map(player => {
     const size = group.length; let points = size > 1 ? size * 10 : 0;
     if (room.mode === 'majority') points = size === largestGroup && size > 1 ? size * 8 + 10 : 0;
-    if (room.mode === 'risky' && size > 1) points *= 2;
+    if (room.mode === 'risky') points = player.risk && size > 1 ? points * 2 : player.risk ? 0 : points;
     if (room.mode === 'chaos' || room.mode === 'final') points *= 2;
     if (player.usedPowerup === 'double' && points) points *= 2;
-    if (size > 1) { player.streak += 1; player.bestStreak = Math.max(player.bestStreak, player.streak); const multiplier = player.streak >= 4 ? 1.5 : player.streak === 3 ? 1.25 : player.streak === 2 ? 1.1 : 1; points = Math.round(points * multiplier); } else player.streak = 0;
+    if (size > 1) { player.matches += 1; player.streak += 1; player.bestStreak = Math.max(player.bestStreak, player.streak); const multiplier = player.streak >= 4 ? 1.5 : player.streak === 3 ? 1.25 : player.streak === 2 ? 1.1 : 1; points = Math.round(points * multiplier); } else player.streak = 0;
     if (room.perfectMeld) points += 75;
     if (player.id === room.fastestId && points) points += 5;
     player.roundPoints = points; player.score += points;
-    return { text: player.answer, authorId: player.id, points, groupSize: size };
+    return { text: player.answer, authorId: player.id, points, groupSize: size, memberIds: group.map(member => member.id) };
   }));
   arm(room, () => room.round >= room.totalRounds ? finish(room) : startRound(room), 7500); broadcast(room);
 }
 function finish(room) { clearTimer(room); room.phase = 'finished'; room.deadline = null; broadcast(room); }
 function addPlayer(room, ws, sessionId, name) {
   const colors = ['#ff5b35', '#8fe8dc', '#d4f458', '#b9a2ff', '#ff9ecb', '#ffd166', '#91c8ff', '#b7e4c7'];
-  const player = { id: sessionId || crypto.randomUUID(), name: cleanName(name), score: 0, roundPoints: 0, streak: 0, bestStreak: 0, connected: true, ws, avatar: ['✦','☻','◉','★','☀','♣','◆','☾'][room.players.size % 8], color: colors[room.players.size % colors.length], powerups: { double: true }, answer: null, usedPowerup: null, lastReaction: 0 };
+  const player = { id: sessionId || crypto.randomUUID(), name: cleanName(name), score: 0, roundPoints: 0, streak: 0, bestStreak: 0, matches: 0, totalSubmitMs: 0, submitCount: 0, connected: true, ws, avatar: ['✦','☻','◉','★','☀','♣','◆','☾'][room.players.size % 8], color: colors[room.players.size % colors.length], powerups: { double: true }, answer: null, risk: false, usedPowerup: null, lastReaction: 0 };
   room.players.set(player.id, player); ws.roomCode = room.code; ws.playerId = player.id; return player;
 }
 function create(ws, name, sessionId) {
   let roomCode = makeCode(); while (rooms.has(roomCode)) roomCode = makeCode();
-  const room = { code: roomCode, hostId: null, phase: 'lobby', round: 0, totalRounds: 6, mode: '', modeLabel: '', prompt: '', options: [], chaos: '', deadline: null, answers: [], players: new Map(), timer: null, lastActivity: Date.now() };
+  const room = { code: roomCode, hostId: null, phase: 'lobby', round: 0, totalRounds: 6, mode: '', modeLabel: '', prompt: '', options: [], chaos: '', deadline: null, answers: [], players: new Map(), spectators: new Set(), timer: null, lastActivity: Date.now() };
   const player = addPlayer(room, ws, sessionId, name); room.hostId = player.id; rooms.set(room.code, room); broadcast(room);
 }
 function join(ws, message) {
@@ -85,17 +85,18 @@ function reconnectOrReject(ws, room, message) {
   player.ws = ws; player.connected = true; ws.roomCode = room.code; ws.playerId = player.id; send(ws, { type: 'reconnected', message: 'You are back in the meld.' }); broadcast(room);
 }
 function handle(ws, message) {
+  if (message.type === 'spectate') { const room = rooms.get(String(message.code || '').toUpperCase()); if (!room) return send(ws, { type: 'error', message: 'Room not found.' }); ws.isSpectator = true; ws.roomCode = room.code; room.spectators.add(ws); send(ws, { type: 'state', state: view(room, null) }); return; }
   if (message.type === 'create') return create(ws, message.name, message.sessionId);
   if (message.type === 'join') return join(ws, message);
   const room = rooms.get(ws.roomCode); if (!room) return;
   const player = room.players.get(ws.playerId); if (!player) return;
   if (message.type === 'start' && player.id === room.hostId && room.players.size >= 2 && room.phase === 'lobby') return startRound(room);
-  if (message.type === 'answer' && room.phase === 'answering' && !player.answer) { const text = String(message.text || '').trim().slice(0, 90); if (!text || Date.now() > room.deadline) return; if (room.mode === 'majority' && !room.options.includes(text)) return; if (room.mode === 'chaos' && text.split(/\s+/).length > 1) return; player.answer = text; player.submittedAt = Date.now(); if ([...room.players.values()].filter(item => item.connected).every(item => item.answer)) reveal(room); else broadcast(room); }
+  if (message.type === 'answer' && room.phase === 'answering' && !player.answer) { const text = String(message.text || '').trim().slice(0, 90); if (!text || Date.now() > room.deadline) return; if (room.mode === 'majority' && !room.options.includes(text)) return; if (room.mode === 'chaos' && text.split(/\s+/).length > 1) return; player.answer = text; player.risk = room.mode === 'risky' && message.risk === true; player.submittedAt = Date.now(); player.totalSubmitMs += player.submittedAt - (room.deadline - 30000); player.submitCount += 1; if ([...room.players.values()].filter(item => item.connected).every(item => item.answer)) reveal(room); else broadcast(room); }
   if (message.type === 'powerup' && room.phase === 'answering' && message.powerup === 'double' && player.powerups.double && !player.usedPowerup) { player.powerups.double = false; player.usedPowerup = 'double'; send(player.ws, { type: 'toast', message: 'DOUBLE DOWN armed for this round.' }); broadcast(room); }
   if (message.type === 'reaction') reaction(room, player, String(message.emoji || '').slice(0, 2));
 }
-const server = http.createServer((req, res) => { const requested = req.url === '/' ? '/public/index.html' : '/public' + req.url; const filePath = path.join(__dirname, requested); fs.readFile(filePath, (error, data) => { if (error) { res.writeHead(404); return res.end('Not found'); } const type = filePath.endsWith('.css') ? 'text/css' : filePath.endsWith('.js') ? 'text/javascript' : 'text/html'; res.writeHead(200, { 'Content-Type': type }); res.end(data); }); });
+const server = http.createServer((req, res) => { const url = new URL(req.url, 'http://localhost'); const pathname = url.pathname === '/' ? '/index.html' : url.pathname; const publicRoot = path.resolve(__dirname, 'public'); const filePath = path.resolve(publicRoot, '.' + pathname); if (!filePath.startsWith(publicRoot + path.sep)) { res.writeHead(403); return res.end('Forbidden'); } fs.readFile(filePath, (error, data) => { if (error) { res.writeHead(404); return res.end('Not found'); } const type = filePath.endsWith('.css') ? 'text/css' : filePath.endsWith('.js') ? 'text/javascript' : 'text/html'; res.writeHead(200, { 'Content-Type': type }); res.end(data); }); });
 const wss = new WebSocket.Server({ server });
-wss.on('connection', ws => { ws.on('message', data => { try { handle(ws, JSON.parse(data)); } catch { send(ws, { type: 'error', message: 'Something went wrong. Try again.' }); } }); ws.on('close', () => { const room = rooms.get(ws.roomCode); if (!room) return; const player = room.players.get(ws.playerId); if (player && player.ws === ws) { player.connected = false; if (room.hostId === player.id) migrateHost(room); else broadcast(room); } }); });
+wss.on('connection', ws => { ws.on('message', data => { try { handle(ws, JSON.parse(data)); } catch { send(ws, { type: 'error', message: 'Something went wrong. Try again.' }); } }); ws.on('close', () => { const room = rooms.get(ws.roomCode); if (!room) return; if (ws.isSpectator) { room.spectators.delete(ws); return; } const player = room.players.get(ws.playerId); if (player && player.ws === ws) { player.connected = false; if (room.hostId === player.id) migrateHost(room); else broadcast(room); } }); });
 setInterval(() => { for (const [roomCode, room] of rooms) { const connected = [...room.players.values()].some(player => player.connected); if (!connected && Date.now() - room.lastActivity > 10 * 60 * 1000) { clearTimer(room); rooms.delete(roomCode); } } }, 60 * 1000);
 server.listen(PORT, () => console.log('Mind Meld Mayhem running at http://localhost:' + PORT));

@@ -42,6 +42,8 @@ npm.cmd start
 
 Then open `http://localhost:3000/`.
 
+For a large-screen show view, open `http://localhost:3000/?projector=1&room=ROOMCODE`. Projector connections are spectator-only and never become players.
+
 ## Future Improvements
 
 Animated reveal staging, projector-specific rendering, sound effects, richer final statistics, and optional AI prompt generation are natural next steps.
