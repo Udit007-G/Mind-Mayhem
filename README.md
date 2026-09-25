@@ -35,12 +35,14 @@ Matching groups earn `group size × 10`, with separate Majority scoring, capped 
 
 ## Running Locally
 
-```powershell
-npm.cmd install
-npm.cmd start
+```bash
+npm install
+npm start
 ```
 
 Then open `http://localhost:3000/`.
+
+Run regression checks with `npm test`.
 
 For a large-screen show view, open `http://localhost:3000/?projector=1&room=ROOMCODE`. Projector connections are spectator-only and never become players.
 

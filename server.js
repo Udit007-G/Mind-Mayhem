@@ -5,6 +5,10 @@ const crypto = require('crypto');
 const WebSocket = require('ws');
 const PORT = process.env.PORT || 3000;
 const rooms = new Map();
+const ANSWER_TIME_MS = 30000;
+const MAX_MESSAGES_PER_SECOND = 40;
+const MAX_ROOM_ACTIONS_PER_MINUTE = 8;
+const roomActions = new Map();
 const prompts = [
   ['classic', 'Name something everyone forgets before leaving home.'],
   ['majority', 'What would most people choose for a midnight snack?'],
@@ -16,7 +20,10 @@ const prompts = [
 const options = ['Pizza', 'Chips', 'Ice cream', 'Maggi'];
 function makeCode() { return Math.random().toString(36).slice(2, 8).toUpperCase(); }
 function cleanName(value) { return String(value || 'Player').replace(/[^a-z0-9 _-]/gi, '').trim().slice(0, 18) || 'Player'; }
-function normalize(value) { return String(value || '').toLowerCase().trim().replace(/[.,!?'"\\x60]/g, '').replace(/\s+/g, ' '); }
+function validSessionId(value) { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
+function normalizedSessionId(value) { return validSessionId(value) ? value : crypto.randomUUID(); }
+function allowRoomAction(ws) { const now = Date.now(); const key = ws._socket?.remoteAddress || 'unknown'; const recent = (roomActions.get(key) || []).filter(timestamp => now - timestamp < 60000); if (recent.length >= MAX_ROOM_ACTIONS_PER_MINUTE) return false; recent.push(now); roomActions.set(key, recent); return true; }
+function normalize(value) { return String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim().replace(/[^\p{L}\p{N}\s]/gu, '').replace(/\s+/g, ' '); }
 function send(ws, message) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message)); }
 function clearTimer(room) { if (room.timer) clearTimeout(room.timer); room.timer = null; }
 function arm(room, fn, ms) { clearTimer(room); room.deadline = Date.now() + ms; room.timer = setTimeout(fn, ms); }
@@ -35,7 +42,7 @@ function startRound(room) {
   room.prompt = room.round === room.totalRounds ? 'The one thing everyone would take to a deserted island.' : promptData[1];
   room.options = room.mode === 'majority' ? options : []; room.chaos = room.mode === 'chaos' ? 'Double points + fastest answer bonus' : room.mode === 'risky' ? 'Risk answers pay 2x when matched' : room.mode === 'final' ? 'Every match is worth 2x' : '';
   room.answers = []; room.perfectMeld = false; room.fastestId = null; for (const player of room.players.values()) { player.answer = null; player.risk = false; player.submittedAt = null; player.roundPoints = 0; player.usedPowerup = null; }
-  arm(room, () => reveal(room), 30000); broadcast(room);
+  arm(room, () => reveal(room), ANSWER_TIME_MS); broadcast(room);
 }
 function reveal(room) {
   if (room.phase !== 'answering') return;
@@ -64,39 +71,42 @@ function finish(room) { clearTimer(room); room.phase = 'finished'; room.deadline
 function addPlayer(room, ws, sessionId, name) {
   const colors = ['#ff5b35', '#8fe8dc', '#d4f458', '#b9a2ff', '#ff9ecb', '#ffd166', '#91c8ff', '#b7e4c7'];
   const player = { id: sessionId || crypto.randomUUID(), name: cleanName(name), score: 0, roundPoints: 0, streak: 0, bestStreak: 0, matches: 0, totalSubmitMs: 0, submitCount: 0, connected: true, ws, avatar: ['✦','☻','◉','★','☀','♣','◆','☾'][room.players.size % 8], color: colors[room.players.size % colors.length], powerups: { double: true }, answer: null, risk: false, usedPowerup: null, lastReaction: 0 };
-  room.players.set(player.id, player); ws.roomCode = room.code; ws.playerId = player.id; return player;
+  player.id = normalizedSessionId(player.id); room.players.set(player.id, player); ws.roomCode = room.code; ws.playerId = player.id; return player;
 }
 function create(ws, name, sessionId) {
+  if (!allowRoomAction(ws)) return send(ws, { type: 'error', message: 'Too many room requests. Try again in a minute.' });
   let roomCode = makeCode(); while (rooms.has(roomCode)) roomCode = makeCode();
   const room = { code: roomCode, hostId: null, phase: 'lobby', round: 0, totalRounds: 6, mode: '', modeLabel: '', prompt: '', options: [], chaos: '', deadline: null, answers: [], players: new Map(), spectators: new Set(), timer: null, lastActivity: Date.now() };
   const player = addPlayer(room, ws, sessionId, name); room.hostId = player.id; rooms.set(room.code, room); broadcast(room);
 }
 function join(ws, message) {
+  if (!allowRoomAction(ws)) return send(ws, { type: 'error', message: 'Too many room requests. Try again in a minute.' });
   const room = rooms.get(String(message.code || '').toUpperCase());
   if (!room) return send(ws, { type: 'error', message: 'Room not found. Check the code and try again.' });
   if (room.phase !== 'lobby') return reconnectOrReject(ws, room, message);
   if (room.players.size >= 8) return send(ws, { type: 'error', message: 'That room is full.' });
   if ([...room.players.values()].some(player => player.name.toLowerCase() === cleanName(message.name).toLowerCase())) return send(ws, { type: 'error', message: 'That nickname is already taken.' });
-  addPlayer(room, ws, message.sessionId, message.name); broadcast(room);
+  const requestedSession = validSessionId(message.sessionId) ? message.sessionId : crypto.randomUUID(); if ([...room.players.values()].some(player => player.id === requestedSession)) return send(ws, { type: 'error', message: 'That session is already active.' }); addPlayer(room, ws, requestedSession, message.name); broadcast(room);
 }
 function reconnectOrReject(ws, room, message) {
+  if (!validSessionId(message.sessionId)) return send(ws, { type: 'error', message: 'Reconnect session is invalid.' });
   const player = room.players.get(message.sessionId);
   if (!player) return send(ws, { type: 'error', message: 'That game has already started. Rejoin with the same browser session.' });
   player.ws = ws; player.connected = true; ws.roomCode = room.code; ws.playerId = player.id; send(ws, { type: 'reconnected', message: 'You are back in the meld.' }); broadcast(room);
 }
 function handle(ws, message) {
   if (message.type === 'spectate') { const room = rooms.get(String(message.code || '').toUpperCase()); if (!room) return send(ws, { type: 'error', message: 'Room not found.' }); ws.isSpectator = true; ws.roomCode = room.code; room.spectators.add(ws); send(ws, { type: 'state', state: view(room, null) }); return; }
-  if (message.type === 'create') return create(ws, message.name, message.sessionId);
+  if (message.type === 'create') return create(ws, message.name, normalizedSessionId(message.sessionId));
   if (message.type === 'join') return join(ws, message);
   const room = rooms.get(ws.roomCode); if (!room) return;
   const player = room.players.get(ws.playerId); if (!player) return;
   if (message.type === 'start' && player.id === room.hostId && room.players.size >= 2 && room.phase === 'lobby') return startRound(room);
-  if (message.type === 'answer' && room.phase === 'answering' && !player.answer) { const text = String(message.text || '').trim().slice(0, 90); if (!text || Date.now() > room.deadline) return; if (room.mode === 'majority' && !room.options.includes(text)) return; if (room.mode === 'chaos' && text.split(/\s+/).length > 1) return; player.answer = text; player.risk = room.mode === 'risky' && message.risk === true; player.submittedAt = Date.now(); player.totalSubmitMs += player.submittedAt - (room.deadline - 30000); player.submitCount += 1; if ([...room.players.values()].filter(item => item.connected).every(item => item.answer)) reveal(room); else broadcast(room); }
+  if (message.type === 'answer' && room.phase === 'answering' && !player.answer) { const text = String(message.text || '').trim().slice(0, 90); if (!text || Date.now() > room.deadline) return; if (room.mode === 'majority' && !room.options.includes(text)) return; if (room.mode === 'chaos' && text.split(/\s+/).length > 1) return; player.answer = text; player.risk = room.mode === 'risky' && message.risk === true; player.submittedAt = Date.now(); player.totalSubmitMs += player.submittedAt - (room.deadline - ANSWER_TIME_MS); player.submitCount += 1; if ([...room.players.values()].filter(item => item.connected).every(item => item.answer)) reveal(room); else broadcast(room); }
   if (message.type === 'powerup' && room.phase === 'answering' && message.powerup === 'double' && player.powerups.double && !player.usedPowerup) { player.powerups.double = false; player.usedPowerup = 'double'; send(player.ws, { type: 'toast', message: 'DOUBLE DOWN armed for this round.' }); broadcast(room); }
   if (message.type === 'reaction') reaction(room, player, String(message.emoji || '').slice(0, 2));
 }
 const server = http.createServer((req, res) => { const url = new URL(req.url, 'http://localhost'); const pathname = url.pathname === '/' ? '/index.html' : url.pathname; const publicRoot = path.resolve(__dirname, 'public'); const filePath = path.resolve(publicRoot, '.' + pathname); if (!filePath.startsWith(publicRoot + path.sep)) { res.writeHead(403); return res.end('Forbidden'); } fs.readFile(filePath, (error, data) => { if (error) { res.writeHead(404); return res.end('Not found'); } const type = filePath.endsWith('.css') ? 'text/css' : filePath.endsWith('.js') ? 'text/javascript' : 'text/html'; res.writeHead(200, { 'Content-Type': type }); res.end(data); }); });
 const wss = new WebSocket.Server({ server });
-wss.on('connection', ws => { ws.on('message', data => { try { handle(ws, JSON.parse(data)); } catch { send(ws, { type: 'error', message: 'Something went wrong. Try again.' }); } }); ws.on('close', () => { const room = rooms.get(ws.roomCode); if (!room) return; if (ws.isSpectator) { room.spectators.delete(ws); return; } const player = room.players.get(ws.playerId); if (player && player.ws === ws) { player.connected = false; if (room.hostId === player.id) migrateHost(room); else broadcast(room); } }); });
+wss.on('connection', ws => { ws.messageWindow = { started: Date.now(), count: 0 }; ws.on('message', data => { const now = Date.now(); if (now - ws.messageWindow.started >= 1000) ws.messageWindow = { started: now, count: 0 }; if (++ws.messageWindow.count > MAX_MESSAGES_PER_SECOND) return send(ws, { type: 'error', message: 'Too many messages. Slow down.' }); try { handle(ws, JSON.parse(data)); } catch { send(ws, { type: 'error', message: 'Something went wrong. Try again.' }); } }); ws.on('close', () => { const room = rooms.get(ws.roomCode); if (!room) return; if (ws.isSpectator) { room.spectators.delete(ws); return; } const player = room.players.get(ws.playerId); if (player && player.ws === ws) { player.connected = false; if (room.hostId === player.id) migrateHost(room); else broadcast(room); } }); });
 setInterval(() => { for (const [roomCode, room] of rooms) { const connected = [...room.players.values()].some(player => player.connected); if (!connected && Date.now() - room.lastActivity > 10 * 60 * 1000) { clearTimer(room); rooms.delete(roomCode); } } }, 60 * 1000);
 server.listen(PORT, () => console.log('Mind Meld Mayhem running at http://localhost:' + PORT));
