@@ -9,14 +9,20 @@ const ANSWER_TIME_MS = 30000;
 const MAX_MESSAGES_PER_SECOND = 40;
 const MAX_ROOM_ACTIONS_PER_MINUTE = 8;
 const roomActions = new WeakMap();
-const prompts = [
-  ['classic', 'Name something everyone forgets before leaving home.'],
-  ['majority', 'What would most people choose for a midnight snack?'],
-  ['classic', 'Name a game people secretly rage at.'],
-  ['risky', 'What is the first thing you would buy if you became rich?'],
-  ['chaos', 'Name a suspicious flavor of ice cream.'],
-  ['classic', 'What would your friend probably order at a restaurant?']
+const questionDeck = [
+  'Name something everyone forgets before leaving home.', 'Name a food almost everyone likes.', 'Name something found in every kitchen.', 'Name a game people secretly rage at.', 'Name something people do when they are bored.', 'Name a classic pizza topping.', 'Name something you pack for a trip.', 'Name a movie genre for a rainy day.', 'Name something that makes a party better.', 'Name a snack people eat at midnight.',
+  'Name something people lose all the time.', 'Name a reason someone is late.', 'Name a food that is better cold.', 'Name something you see at an airport.', 'Name an excuse for not replying.', 'Name something that belongs in a backpack.', 'Name a popular ice cream flavor.', 'Name something people do before bed.', 'Name a word that sounds funny.', 'Name a dream holiday destination.',
+  'Name something you would buy if rich.', 'Name a terrible pet name.', 'Name something found under a bed.', 'Name a hobby people try once.', 'Name something that ruins a selfie.', 'Name a food you can eat with one hand.', 'Name a reason to leave a party early.', 'Name something that is always too loud.', 'Name a famous fictional villain.', 'Name a thing people pretend to understand.',
+  'Name something you would never share.', 'Name a school subject people complain about.', 'Name something you do on a lazy Sunday.', 'Name a suspicious ice cream flavor.', 'Name something that makes you nervous.', 'Name a popular street food.', 'Name something found in a bathroom.', 'Name a bad first date idea.', 'Name a word associated with summer.', 'Name something you would save in a fire.',
+  'Name a food that is hard to eat neatly.', 'Name a reason someone checks their phone.', 'Name a common group chat topic.', 'Name something that always needs charging.', 'Name a sport people watch loudly.', 'Name something you would put on a sandwich.', 'Name an animal that would make a bad roommate.', 'Name a place people nap.', 'Name something people collect.', 'Name a song everyone knows the chorus to.',
+  'Name something that smells amazing.', 'Name something that smells terrible.', 'Name a thing you do when nobody is watching.', 'Name a word that starts with B.', 'Name something you borrow and forget to return.', 'Name a meal you could eat every day.', 'Name something that makes a good gift.', 'Name an app people open too often.', 'Name a reason to celebrate.', 'Name something you see at a wedding.',
+  'Name a character from a superhero movie.', 'Name something you would put in a time capsule.', 'Name a food that divides opinions.', 'Name something that makes you feel lucky.', 'Name a place you would hide during hide-and-seek.', 'Name a thing that is better with friends.', 'Name something people do on a first date.', 'Name an object that is easy to break.', 'Name something you would take to a desert island.', 'Name a reason someone might fake confidence.',
+  'Name something that belongs on a desk.', 'Name a color people wear often.', 'Name a thing you would ask a genie for.', 'Name something people do in traffic.', 'Name a food people eat at breakfast.', 'Name something that makes a room cozy.', 'Name a job you would try for one day.', 'Name something people fear for no reason.', 'Name a fictional place you would visit.', 'Name something you would put in a care package.',
+  'Name an item people forget at hotels.', 'Name something that makes a bad alarm clock.', 'Name a word associated with friendship.', 'Name a reason to open the fridge.', 'Name something found in a garage.', 'Name a food that belongs at a picnic.', 'Name something that is hard to explain.', 'Name a thing people do when stressed.', 'Name a school or college memory.', 'Name something you would bring to a sleepover.',
+  'Name an object that could be a weapon in a cartoon.', 'Name something people say when surprised.', 'Name a place you would not want to be stuck.', 'Name a thing that makes you laugh instantly.', 'Name a meal people order for delivery.', 'Name something that belongs in a junk drawer.', 'Name a bad name for a restaurant.', 'Name an animal that looks judgmental.', 'Name a reason to wear sunglasses indoors.', 'Name something that makes a good team name.'
 ];
+const promptModes = ['classic', 'classic', 'majority', 'classic', 'risky', 'classic', 'chaos'];
+const prompts = questionDeck.map((question, index) => [promptModes[index % promptModes.length], question]);
 const options = ['Pizza', 'Chips', 'Ice cream', 'Maggi'];
 function makeCode() { return Math.random().toString(36).slice(2, 8).toUpperCase(); }
 function cleanName(value) { return String(value || 'Player').replace(/[^a-z0-9 _-]/gi, '').trim().slice(0, 18) || 'Player'; }
@@ -36,7 +42,7 @@ function broadcast(room) { room.lastActivity = Date.now(); for (const player of 
 function migrateHost(room) { const nextHost = [...room.players.values()].find(player => player.connected); if (!nextHost || nextHost.id === room.hostId) return; const previousHost = room.players.get(room.hostId); room.hostId = nextHost.id; for (const player of room.players.values()) send(player.ws, { type: 'toast', message: '👑 ' + nextHost.name + ' is now host.' }); broadcast(room); }
 function reaction(room, player, emoji) { if (Date.now() - player.lastReaction < 900) return; player.lastReaction = Date.now(); for (const target of room.players.values()) send(target.ws, { type: 'reaction', emoji, name: player.name }); }
 function startRound(room) {
-  const promptData = prompts[room.round % prompts.length];
+  let promptIndex = Math.floor(Math.random() * prompts.length); if (prompts.length > 1 && promptIndex === room.lastPromptIndex) promptIndex = (promptIndex + 1) % prompts.length; room.lastPromptIndex = promptIndex; const promptData = prompts[promptIndex];
   room.round += 1; room.phase = 'answering'; room.mode = room.round === room.totalRounds ? 'final' : promptData[0];
   room.modeLabel = room.round === room.totalRounds ? 'ULTIMATE MELD · 2X POINTS' : room.mode === 'majority' ? 'MAJORITY MIND · PICK ONE' : room.mode === 'risky' ? 'RISKY MIND · HIGH STAKES' : room.mode === 'chaos' ? 'CHAOS ROUND · DOUBLE POINTS' : 'CLASSIC MIND MELD';
   room.prompt = room.round === room.totalRounds ? 'The one thing everyone would take to a deserted island.' : promptData[1];
