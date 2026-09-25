@@ -11,3 +11,4 @@
 .card:hover,.prompt-card:hover{transform:none;box-shadow:7px 7px 0 rgba(24,23,19,.08)}.answer-box,.answer-box textarea{animation:none!important}
 .nudge-hint{display:inline-block;background:var(--blue,#8fe8dc);padding:8px 10px;margin-bottom:10px;font:600 10px 'DM Mono';transform:rotate(-1deg)}
 .mode-banner.chaos span{font-size:12px;font-weight:700;background:var(--orange);color:#fff;padding:7px 10px;letter-spacing:.04em}.mode-banner.final span{font-size:12px;font-weight:700}.mode-banner.chaos{gap:16px}
+.reaction-note{display:inline-block;margin-left:8px;background:var(--lime);padding:3px 6px;color:var(--ink);font:600 9px 'DM Mono';animation:reactionIn .2s ease-out}@keyframes reactionIn{from{opacity:0;transform:translateX(-5px)}to{opacity:1;transform:translateX(0)}}

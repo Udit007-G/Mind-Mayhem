@@ -21,9 +21,10 @@ const questionDeck = [
   'Name an item people forget at hotels.', 'Name something that makes a bad alarm clock.', 'Name a word associated with friendship.', 'Name a reason to open the fridge.', 'Name something found in a garage.', 'Name a food that belongs at a picnic.', 'Name something that is hard to explain.', 'Name a thing people do when stressed.', 'Name a school or college memory.', 'Name something you would bring to a sleepover.',
   'Name an object that could be a weapon in a cartoon.', 'Name something people say when surprised.', 'Name a place you would not want to be stuck.', 'Name a thing that makes you laugh instantly.', 'Name a meal people order for delivery.', 'Name something that belongs in a junk drawer.', 'Name a bad name for a restaurant.', 'Name an animal that looks judgmental.', 'Name a reason to wear sunglasses indoors.', 'Name something that makes a good team name.'
 ];
-const promptModes = ['classic', 'classic', 'majority', 'classic', 'risky', 'classic', 'chaos'];
+const promptModes = Array.from({ length: 100 }, (_, index) => index < 80 ? 'majority' : ['classic', 'risky', 'chaos', 'classic'][index % 4]);
 const prompts = questionDeck.map((question, index) => [promptModes[index % promptModes.length], question]);
 const options = ['Pizza', 'Chips', 'Ice cream', 'Maggi'];
+function shuffled(values) { return [...values].sort(() => Math.random() - 0.5); }
 function makeCode() { return Math.random().toString(36).slice(2, 8).toUpperCase(); }
 function cleanName(value) { return String(value || 'Player').replace(/[^a-z0-9 _-]/gi, '').trim().slice(0, 18) || 'Player'; }
 function validSessionId(value) { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
@@ -42,8 +43,8 @@ function broadcast(room) { room.lastActivity = Date.now(); for (const player of 
 function migrateHost(room) { const nextHost = [...room.players.values()].find(player => player.connected); if (!nextHost || nextHost.id === room.hostId) return; const previousHost = room.players.get(room.hostId); room.hostId = nextHost.id; for (const player of room.players.values()) send(player.ws, { type: 'toast', message: '👑 ' + nextHost.name + ' is now host.' }); broadcast(room); }
 function reaction(room, player, emoji) { if (Date.now() - player.lastReaction < 900) return; player.lastReaction = Date.now(); for (const target of room.players.values()) send(target.ws, { type: 'reaction', emoji, name: player.name }); }
 function startRound(room) {
-  let promptIndex = Math.floor(Math.random() * prompts.length); if (prompts.length > 1 && promptIndex === room.lastPromptIndex) promptIndex = (promptIndex + 1) % prompts.length; room.lastPromptIndex = promptIndex; const promptData = prompts[promptIndex];
-  room.round += 1; room.phase = 'answering'; room.mode = room.round === room.totalRounds ? 'final' : promptData[0];
+  room.round += 1; room.phase = 'answering'; room.mode = room.round === room.totalRounds ? 'final' : room.roundModes[room.round - 1];
+  const matchingPrompts = prompts.map((prompt, index) => ({ prompt, index })).filter(item => item.prompt[0] === room.mode && !room.usedPrompts.has(item.index)); const availablePrompts = matchingPrompts.length ? matchingPrompts : prompts.map((prompt, index) => ({ prompt, index })).filter(item => !room.usedPrompts.has(item.index)); if (!availablePrompts.length) room.usedPrompts.clear(); const pool = availablePrompts.length ? availablePrompts : prompts.map((prompt, index) => ({ prompt, index })); const selected = pool[Math.floor(Math.random() * pool.length)]; room.usedPrompts.add(selected.index); const promptData = selected.prompt;
   room.modeLabel = room.round === room.totalRounds ? 'ULTIMATE MELD · 2X POINTS' : room.mode === 'majority' ? 'MAJORITY MIND · PICK ONE' : room.mode === 'risky' ? 'RISKY MIND · HIGH STAKES' : room.mode === 'chaos' ? 'CHAOS ROUND · DOUBLE POINTS' : 'CLASSIC MIND MELD';
   room.prompt = room.round === room.totalRounds ? 'The one thing everyone would take to a deserted island.' : promptData[1];
   room.options = room.mode === 'majority' ? options : []; room.chaos = room.mode === 'chaos' ? 'Double points + fastest answer bonus · ONE WORD ONLY' : room.mode === 'risky' ? 'Risk answers pay 2x when matched' : room.mode === 'final' ? 'Every match is worth 2x' : '';
@@ -82,7 +83,7 @@ function addPlayer(room, ws, sessionId, name) {
 function create(ws, name, sessionId) {
   if (!allowRoomAction(ws)) return send(ws, { type: 'error', message: 'Too many room requests. Try again in a minute.' });
   let roomCode = makeCode(); while (rooms.has(roomCode)) roomCode = makeCode();
-  const room = { code: roomCode, hostId: null, phase: 'lobby', round: 0, totalRounds: 6, mode: '', modeLabel: '', prompt: '', options: [], chaos: '', deadline: null, answers: [], players: new Map(), spectators: new Set(), timer: null, lastActivity: Date.now() };
+  const room = { code: roomCode, hostId: null, phase: 'lobby', round: 0, totalRounds: 7, roundModes: shuffled(['classic', 'majority', 'risky', 'chaos', 'classic', 'majority']).concat('final'), mode: '', modeLabel: '', prompt: '', options: [], chaos: '', deadline: null, answers: [], usedPrompts: new Set(), players: new Map(), spectators: new Set(), timer: null, lastActivity: Date.now() };
   const player = addPlayer(room, ws, sessionId, name); room.hostId = player.id; rooms.set(room.code, room); broadcast(room);
 }
 function join(ws, message) {
