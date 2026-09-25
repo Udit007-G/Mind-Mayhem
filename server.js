@@ -8,7 +8,7 @@ const rooms = new Map();
 const ANSWER_TIME_MS = 30000;
 const MAX_MESSAGES_PER_SECOND = 40;
 const MAX_ROOM_ACTIONS_PER_MINUTE = 8;
-const roomActions = new Map();
+const roomActions = new WeakMap();
 const prompts = [
   ['classic', 'Name something everyone forgets before leaving home.'],
   ['majority', 'What would most people choose for a midnight snack?'],
@@ -22,7 +22,7 @@ function makeCode() { return Math.random().toString(36).slice(2, 8).toUpperCase(
 function cleanName(value) { return String(value || 'Player').replace(/[^a-z0-9 _-]/gi, '').trim().slice(0, 18) || 'Player'; }
 function validSessionId(value) { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
 function normalizedSessionId(value) { return validSessionId(value) ? value : crypto.randomUUID(); }
-function allowRoomAction(ws) { const now = Date.now(); const key = ws._socket?.remoteAddress || 'unknown'; const recent = (roomActions.get(key) || []).filter(timestamp => now - timestamp < 60000); if (recent.length >= MAX_ROOM_ACTIONS_PER_MINUTE) return false; recent.push(now); roomActions.set(key, recent); return true; }
+function allowRoomAction(ws) { const now = Date.now(); const recent = (roomActions.get(ws) || []).filter(timestamp => now - timestamp < 60000); if (recent.length >= MAX_ROOM_ACTIONS_PER_MINUTE) return false; recent.push(now); roomActions.set(ws, recent); return true; }
 function normalize(value) { return String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim().replace(/[^\p{L}\p{N}\s]/gu, '').replace(/\s+/g, ' '); }
 function send(ws, message) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message)); }
 function clearTimer(room) { if (room.timer) clearTimeout(room.timer); room.timer = null; }
@@ -107,6 +107,6 @@ function handle(ws, message) {
 }
 const server = http.createServer((req, res) => { const url = new URL(req.url, 'http://localhost'); const pathname = url.pathname === '/' ? '/index.html' : url.pathname; const publicRoot = path.resolve(__dirname, 'public'); const filePath = path.resolve(publicRoot, '.' + pathname); if (!filePath.startsWith(publicRoot + path.sep)) { res.writeHead(403); return res.end('Forbidden'); } fs.readFile(filePath, (error, data) => { if (error) { res.writeHead(404); return res.end('Not found'); } const type = filePath.endsWith('.css') ? 'text/css' : filePath.endsWith('.js') ? 'text/javascript' : 'text/html'; res.writeHead(200, { 'Content-Type': type }); res.end(data); }); });
 const wss = new WebSocket.Server({ server });
-wss.on('connection', ws => { ws.messageWindow = { started: Date.now(), count: 0 }; ws.on('message', data => { const now = Date.now(); if (now - ws.messageWindow.started >= 1000) ws.messageWindow = { started: now, count: 0 }; if (++ws.messageWindow.count > MAX_MESSAGES_PER_SECOND) return send(ws, { type: 'error', message: 'Too many messages. Slow down.' }); try { handle(ws, JSON.parse(data)); } catch { send(ws, { type: 'error', message: 'Something went wrong. Try again.' }); } }); ws.on('close', () => { const room = rooms.get(ws.roomCode); if (!room) return; if (ws.isSpectator) { room.spectators.delete(ws); return; } const player = room.players.get(ws.playerId); if (player && player.ws === ws) { player.connected = false; if (room.hostId === player.id) migrateHost(room); else broadcast(room); } }); });
+wss.on('connection', ws => { ws.messageWindow = { started: Date.now(), count: 0 }; ws.rateViolations = 0; ws.on('message', data => { const now = Date.now(); if (now - ws.messageWindow.started >= 1000) { ws.messageWindow = { started: now, count: 0 }; ws.rateViolations = 0; } if (++ws.messageWindow.count > MAX_MESSAGES_PER_SECOND) { ws.rateViolations += 1; if (ws.rateViolations >= 3) return ws.close(1008, 'Message rate exceeded'); return send(ws, { type: 'error', message: 'Too many messages. Slow down.' }); } try { handle(ws, JSON.parse(data)); } catch { send(ws, { type: 'error', message: 'Something went wrong. Try again.' }); } }); ws.on('close', () => { const room = rooms.get(ws.roomCode); if (!room) return; if (ws.isSpectator) { room.spectators.delete(ws); return; } const player = room.players.get(ws.playerId); if (player && player.ws === ws) { player.connected = false; if (room.hostId === player.id) migrateHost(room); else broadcast(room); } }); });
 setInterval(() => { for (const [roomCode, room] of rooms) { const connected = [...room.players.values()].some(player => player.connected); if (!connected && Date.now() - room.lastActivity > 10 * 60 * 1000) { clearTimer(room); rooms.delete(roomCode); } } }, 60 * 1000);
 server.listen(PORT, () => console.log('Mind Meld Mayhem running at http://localhost:' + PORT));
